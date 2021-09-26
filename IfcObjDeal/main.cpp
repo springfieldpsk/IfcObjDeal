@@ -12,7 +12,7 @@
 #include <set>
 #include <unordered_map>
 
-#define TINYOBJLOADER_IVerticesCntMapLEMENTATION
+#define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
 #define GLM_FORCE_RADIANS
@@ -85,6 +85,7 @@ struct VertexSet
 
     bool UseFlag; // 使用标记 确定是否符合要求
     bool TestCancelFlag; // 取消合并测试标志
+    bool JulCancelFlag; // 取消判断测试标志
 
     inline void AddIn(const glm::vec3& v) {
         if (VerticesVis.count(v)) return;
@@ -103,6 +104,8 @@ struct VertexSet
         AABBBox[1] = { std::max(v1.x,v2.x),std::max(v1.y,v2.y),std::max(v1.z,v2.z) };
 
         UseFlag = true;
+        TestCancelFlag = false;
+        JulCancelFlag = false;
     } // 初始化构造函数 将初始点加入点集并构建AABB包围盒
 
     void AddVector(glm::vec3 v) {
@@ -163,19 +166,24 @@ class IfcObjDeal {
 private:
    
     const std::string MODEL_PATH;
+    const std::string WRITE_PATH;
     const float ThresholdWidth;
     const float ThresholdHeight;
     const float eps = 1e-6;
 
     std::unordered_map<std::string, bool>ThresholdName;
     std::unordered_map<std::string, uint32_t>VerticesCntMap;
-    std::unordered_map<std::string, bool>CancelMap;
+    std::unordered_map<std::string, bool>CancelOutMap;
+    std::unordered_map<std::string, bool>CancelJulMap;
 
     std::vector<VertexSet> VerticesSets;
     std::vector<VerticesGroup> VerticesGroups;
+    std::vector<std::string> ThresholdNameList;
+    std::vector<std::string> CancelOutNameList;
+    std::vector<std::string> CancelJudNameList;
 
 public:
-    IfcObjDeal(const std::string _path, const float& width, const float& height) :MODEL_PATH(_path), ThresholdHeight(height), ThresholdWidth(width) {
+    IfcObjDeal(const std::string m_path,const std::string w_path, const float& width, const float& height) :MODEL_PATH(m_path),WRITE_PATH(w_path),ThresholdHeight(height), ThresholdWidth(width) {
 
     };
 
@@ -183,17 +191,24 @@ public:
         return abs(a - b) < eps;
     }
 
+    void ReadList(const std::vector<std::string>& ThrList, const std::vector<std::string>&CancelOList, const std::vector<std::string>& CancelJList) {
+        ThresholdNameList = ThrList;
+        CancelJudNameList = CancelJList;
+        CancelOutNameList = CancelOList;
+    }
+
     void initIfcObjDeal() {
-        std::vector<std::string> ThresholdNameList;
-        ThresholdNameList.push_back("B-11");
+
         for (const auto& Name : ThresholdNameList) {
             ThresholdName[Name] = true;
         }
 
-        std::vector<std::string> CancelNameList;
-        CancelNameList.push_back("B-5");
-        for (const auto& Name : CancelNameList) {
-            CancelMap[Name] = true;
+        for (const auto& Name : CancelOutNameList) {
+            CancelOutMap[Name] = true;
+        }
+
+        for (const auto& Name : CancelJudNameList) {
+            CancelJulMap[Name] = true;
         }
     }
 
@@ -276,13 +291,21 @@ public:
     } // 载入Obj文件至私有格式
 
     void preReject() {
+        //std::cout << "PreReject Name:" << '\n';
         for (size_t i = 0; i < VerticesSets.size(); i++) {
             VerticesSets[i].CheckThreshold(ThresholdName);
 
-            if (CancelMap.count(VerticesSets[i].Name)) {
-                VerticesGroup tmp = VerticesGroup(VerticesSets[i]);
-                VerticesGroups.push_back(tmp);
+            if (CancelOutMap.count(VerticesSets[i].Name)) {
+                if (VerticesSets[i].UseFlag) {
+                    VerticesGroup tmp = VerticesGroup(VerticesSets[i]);
+                    VerticesGroups.push_back(tmp);
+                }
+                //std::cout << VerticesSets[i].Name << '\n';
                 VerticesSets[i].TestCancelFlag = true;
+            }
+
+            if (CancelJulMap.count(VerticesSets[i].Name)) {
+                VerticesSets[i].JulCancelFlag = true;
             }
         }
     }
@@ -290,16 +313,21 @@ public:
 
     void InitVerGroup() {
         for (size_t i = 0; i < VerticesSets.size(); i++) {
+            //std::cout << "!:" << VerticesSets[i].Name << ' ' << VerticesSets[i].Vertices.size() <<' '<< VerticesSets[i].UseFlag<<' '<< VerticesSets[i].TestCancelFlag <<'\n';
             if (!VerticesSets[i].UseFlag || VerticesSets[i].TestCancelFlag) continue;
+            //std::cout << "!:"<<VerticesSets[i].Name << ' '<<VerticesSets[i].Vertices.size()<<'\n';
             for (size_t j = 0; j < VerticesSets.size(); j++) {
-                if (VerticesSets[j].UseFlag) continue;
+                if (VerticesSets[j].UseFlag || VerticesSets[j].JulCancelFlag) continue;
+
                 for (auto v : VerticesSets[j].Vertices) {
                     if (VerticesSets[i].CheckVector(v)) {
                         VerticesSets[i].AddIn(v);
                     }
                 }
             }
+            //std::cout << "!:" << VerticesSets[i].Name << ' ' << VerticesSets[i].Vertices.size() << '\n';
             // 合并点集 将剔除出的点集中的点加入未剔除的点集
+
             std::unordered_map<glm::vec3, bool>CoordinateVis;
             UnionFind* uF = new UnionFind(VerticesSets[i].Vertices.size());
             std::vector<VertexSet> tmp;
@@ -360,6 +388,20 @@ public:
     }
     // 生成点群
 
+    void OutputVerSets() {
+        std::cout << "VerticesSets Name\n";
+        for (const auto& v : VerticesSets) {
+            if (!v.UseFlag) continue;
+            std::cout << v.Name << ' ' << v.Vertices.size() << '\n';
+        }
+        std::cout << '\n';
+
+        std::cout << "VerticesGroups Name\n";
+        for (const auto& v : VerticesGroups) {
+            std::cout << v.Name << ' ' << v.Vertices.size() << '\n';
+        }
+        std::cout << '\n';
+    }
     void VerGroupReName() {
         for (size_t i = 0; i < VerticesGroups.size(); i++) {
 
@@ -371,24 +413,128 @@ public:
             else VerticesCntMap[VertexName] = 0;
             VerticesGroups[i].Name = VertexName;
 
-            std::cout << VerticesGroups[i].Name << ' ' << VerticesGroups[i].Vertices.size() << std::endl;
+            //std::cout << VerticesGroups[i].Name << ' ' << VerticesGroups[i].Vertices.size() << std::endl;
         }
     }
     // 重命名
+
+    void WriteToCsv() {
+        std::ofstream dstFile(WRITE_PATH, std::ios::out);
+        if (!dstFile) {
+            throw std::runtime_error("写入文件失败");
+        }
+        uint32_t cnt = 0;
+        for (const auto& v : VerticesGroups) {
+            cnt = std::max(cnt, v.Vertices.size());
+        }
+
+        dstFile << "面编号,";
+
+        for (size_t i = 0; i < cnt; i++) {
+            if (i) dstFile << ",";
+            dstFile << ",坐标" + std::to_string(i + 1) << ",";
+        }
+        dstFile << std::endl;
+
+        for (size_t i = 0; i < VerticesGroups.size(); i++) {
+            dstFile << VerticesGroups[i].Name << ",";
+            for (const auto& v : VerticesGroups[i].Vertices) {
+                dstFile << v.x << "," << v.y << "," << v.z << ",";
+            }
+            dstFile << std::endl;
+        }
+
+        dstFile.close();
+    }
 
     void mainLoop() {
 
         initIfcObjDeal();
         LoadObj();
         preReject();
+        //OutputVerSets();
         InitVerGroup();
         VerGroupReName();
+        WriteToCsv();
     }
 };
 
-int main() {
+class BuildIfcObjInstance {
+private:
+    const std::string CFG_PATH;
+public:
+    BuildIfcObjInstance(const std::string& _path) :CFG_PATH(_path) {
+        if (!JudgeFile(CFG_PATH, "cfg")) {
+            throw std::runtime_error("cfg file error");
+        }
+    }
+    bool JudgeFile(const std::string& _path, const std::string& Bak) {
+        std::string bak = "";
+        for (const auto& v : _path) {
+            if (v == '.') bak.clear();
+            else bak.push_back(v);
+        }
+        // cout<<bak<<endl;
+        return bak == Bak;
+    }
+    IfcObjDeal* RunCFG() {
+        std::string SRC_PATH;
+        std::string DST_PATH;
+        float THR_W, THR_H;
 
-    IfcObjDeal* Instance = new IfcObjDeal("res.obj", 0.2, 0.2);
+        std::ifstream CFGFile(CFG_PATH, std::ios::in);
+        CFGFile >> SRC_PATH >> DST_PATH >> THR_W >> THR_H;
+
+        if (!JudgeFile(SRC_PATH, "obj")) {
+            throw std::runtime_error(SRC_PATH + "obj file error");
+        }
+        if (!JudgeFile(DST_PATH, "csv")) {
+            throw std::runtime_error(DST_PATH + "csv file error");
+        }
+
+        std::vector<std::string> ThrList;
+        std::vector<std::string> CancelOLis;
+        std::vector<std::string> CancelJList;
+        uint32_t flag = 0;
+        std::string tmp;
+
+        while (CFGFile >> tmp) {
+            if (tmp == "THR") flag = 1;
+            else if (tmp == "COL") flag = 2;
+            else if (tmp == "CJL") flag = 3;
+            else {
+                if (flag == 1) ThrList.push_back(tmp);
+                else if (flag == 2) CancelOLis.push_back(tmp);
+                else if (flag == 3) CancelJList.push_back(tmp);
+            }
+        }
+
+         std::cout<<SRC_PATH<<' '<<DST_PATH<<' '<<THR_W<<' '<<THR_H<<std::endl;
+         std::cout<<"THr:";
+         for(auto v : ThrList) std::cout<<v<<' ';
+         std::cout<<std::endl;
+         std::cout<<"COL:";
+         for(auto v : CancelOLis) std::cout<<v<<' ';
+         std::cout<<std::endl;
+         std::cout<<"CJL:";
+         for(auto v : CancelJList) std::cout<<v<<' ';
+         std::cout<<std::endl;
+        IfcObjDeal* instance = new IfcObjDeal(SRC_PATH, DST_PATH, THR_W, THR_H);
+        instance->ReadList(ThrList, CancelOLis, CancelJList);
+        return instance;
+    }
+};
+
+int main(int arg,char** args) {
+
+    if (arg != 3 || strcmp(args[1], "--CFG")) {
+        std::cerr << "输入参数错误 请使用客户端打开" << std::endl;
+        return 0;
+    }
+
+    BuildIfcObjInstance* instance = new BuildIfcObjInstance(args[2]);
+    instance->RunCFG();
+    IfcObjDeal* Instance = instance->RunCFG();
     
     try {
         Instance->mainLoop();
@@ -400,6 +546,6 @@ int main() {
     }
 
     delete Instance;
+    std::cout << "处理结束" << '\n';
     return EXIT_SUCCESS;
-	return 0;
 }
